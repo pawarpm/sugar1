@@ -1,23 +1,30 @@
 # streamlit_app.py
-import streamlit as st
+import os
+import logging
+import warnings
 from pathlib import Path
+from io import BytesIO, StringIO
 from PIL import Image
 import numpy as np
 import zipfile
 import tempfile
-import os
-from io import BytesIO
+
+# Suppress noisy logs/warnings before importing TensorFlow
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # INFO=1, WARNING=2, ERROR=3 -> hide INFO/WARNING
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore")
+
+import streamlit as st
 from scipy.special import softmax
 
-# TensorFlow / Keras
+# Import TensorFlow / Keras after suppression flags
 import tensorflow as tf
 from tensorflow.keras.models import load_model
+import gdown  # to download shared file from Google Drive
 
-# to download from Google Drive
-# gdown will be used to download the shared file id
-import gdown
-
-st.set_page_config(page_title="Image Classifier (Keras .keras)", layout="wide")
+# Streamlit config & deprecation option
+st.set_page_config(page_title="Web Application for Sugarcane Age Detection using Drone Imagery", layout="wide")
+st.set_option('deprecation.showfileUploaderEncoding', False)
 
 # -------- Configuration --------
 DRIVE_FILE_ID_DEFAULT = "10JYTIb9CWNhGbhnBNEA1Yj8SVVqx5BjE"
@@ -26,7 +33,7 @@ VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 USE_VGG_PREPROCESS = False  # default; UI lets user change
 TOP_K_DEFAULT = 3
 
-# -------- Utilities (adapted from your code) --------
+# -------- Utilities (adapted & improved) --------
 def get_model_input_size(model):
     shape = getattr(model, "input_shape", None)
     if isinstance(shape, list):
@@ -111,7 +118,6 @@ def download_from_gdrive(file_id: str, dest_path: str, force=False):
     if dest.exists() and not force:
         return str(dest)
     url = f"https://drive.google.com/uc?id={file_id}"
-    # gdown supports Google Drive direct download
     gdown.download(url, str(dest), quiet=False)
     return str(dest)
 
@@ -130,18 +136,29 @@ def load_model_preferred(path, convert_h5_to_keras=True, compile=False, custom_o
     else:
         return load_model(str(p), compile=compile, custom_objects=custom_objects)
 
-# Cache model loading for streamlit
 @st.cache_resource(show_spinner=False)
 def get_model_from_drive_or_path(drive_file_id: str = DRIVE_FILE_ID_DEFAULT, local_path: str = DEFAULT_MODEL_FILENAME, force_download=False):
-    # 1) download
     dest = download_from_gdrive(drive_file_id, local_path, force=force_download)
-    # 2) load using the preferred loader
     model = load_model_preferred(dest, convert_h5_to_keras=True, compile=False, custom_objects=None)
     return model, dest
 
 # -------- Streamlit UI --------
-st.title("Keras `.keras` Image Classifier")
-st.markdown("Upload images (or a ZIP of images). The app downloads a `.keras` file from a Google Drive link and uses it to predict.")
+st.title("Web Application for Sugarcane Age Detection using Drone Imagery")
+st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  \n**Research funding support from:** Rajiv Gandhi Science and Technology Commission, Government of Maharashtra")
+st.markdown("---")
+
+# Brief model summary paragraph requested by user
+st.markdown(
+    """
+**About the Model (brief):**
+
+This application uses a MobileNet backbone (MobileNetV2-style) fine-tuned on drone imagery of sugarcane fields.
+The model was trained to classify sugarcane crop age into discrete classes (for example: 2_month, 4_month, 6_month, 9_month, 11_month).
+The trained MobileNet features are followed by a custom classification head (dense layer(s) and a final softmax classification layer).
+The app downloads the inference `.keras` model from a provided Google Drive link, runs predictions on uploaded images (or ZIPs of images),
+and returns top-K predicted age classes with probabilities.
+"""
+)
 
 with st.sidebar:
     st.header("Model / Prediction Settings")
@@ -157,7 +174,6 @@ with st.sidebar:
     custom_map_text = st.text_area("Paste mapping (leave empty to auto)", height=100)
     if custom_map_text.strip():
         try:
-            # use eval cautiously; this is a convenience for users who paste a dict literal
             class_map = eval(custom_map_text.strip(), {})
             if not isinstance(class_map, dict):
                 st.warning("Mapping is not a dict. Falling back to auto map.")
@@ -177,9 +193,15 @@ with st.spinner("Downloading and loading model (if needed)..."):
         st.stop()
 
 st.success(f"Model loaded from: {model_path}")
-st.write("Model summary (collapsed):")
-with st.expander("Model summary"):
-    st.text(str(model.summary()))
+
+# Show readable model summary inside an expander (capture from model.summary())
+with st.expander("Model summary (click to expand)"):
+    s = StringIO()
+    try:
+        model.summary(print_fn=lambda x: s.write(x + "\n"))
+        st.text(s.getvalue())
+    except Exception as e:
+        st.text(f"Could not display model summary: {e}")
 
 # Files input
 st.header("Upload files")
@@ -191,7 +213,6 @@ if uploaded:
     for up in uploaded:
         # Handle zip
         if up.name.lower().endswith(".zip"):
-            # write bytes to temp file then extract
             tmpdir = tempfile.mkdtemp()
             zpath = Path(tmpdir) / up.name
             with open(zpath, "wb") as f:
@@ -215,7 +236,9 @@ if uploaded:
                         try:
                             res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
                             results_all[str(imgp)] = res
-                            st.image(pil, caption=f"{imgp.name} — Top: {res[0][1]} ({res[0][2]:.3f})", use_column_width=True)
+                            # display image at half size (improve look)
+                            display_width = max(32, pil.width // 2)
+                            st.image(pil, caption=f"{imgp.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
                             for rank, (idx, name, p) in enumerate(res, start=1):
                                 st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
                             st.markdown("---")
@@ -230,7 +253,8 @@ if uploaded:
             try:
                 res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
                 results_all[up.name] = res
-                st.image(pil, caption=f"{up.name} — Top: {res[0][1]} ({res[0][2]:.3f})", use_column_width=True)
+                display_width = max(32, pil.width // 2)
+                st.image(pil, caption=f"{up.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
                 for rank, (idx, name, p) in enumerate(res, start=1):
                     st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
                 st.markdown("---")
@@ -240,7 +264,7 @@ if uploaded:
             st.warning(f"Skipping file {up.name} — unsupported type.")
 
     st.success("Done classifying uploaded files.")
-    # Optionally show results as JSON or CSV download
+    # Optionally show results as CSV download
     if st.button("Download results (CSV)"):
         import pandas as pd
         rows = []
