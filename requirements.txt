@@ -1,0 +1,7 @@
+streamlit==1.25.0
+tensorflow==2.14.0
+pillow
+numpy
+gdown
+h5py
+requests
