@@ -1,7 +1,7 @@
-streamlit==1.25.0
-tensorflow==2.14.0
-pillow
-numpy
+streamlit>=1.18
+tensorflow>=2.12   # match your environment / TF version used to create the model
 gdown
-h5py
-requests
+pillow
+scipy
+numpy
+pandas
