@@ -10,7 +10,7 @@ import zipfile
 import tempfile
 
 # Suppress noisy logs/warnings before importing TensorFlow
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # INFO=1, WARNING=2, ERROR=3 -> hide INFO/WARNING
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # hide INFO/WARNING from TF
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore")
 
@@ -22,9 +22,8 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 import gdown  # to download shared file from Google Drive
 
-# Streamlit config & deprecation option
+# Streamlit config
 st.set_page_config(page_title="Web Application for Sugarcane Age Detection using Drone Imagery", layout="wide")
-st.set_option('deprecation.showfileUploaderEncoding', False)
 
 # -------- Configuration --------
 DRIVE_FILE_ID_DEFAULT = "10JYTIb9CWNhGbhnBNEA1Yj8SVVqx5BjE"
@@ -32,6 +31,10 @@ DEFAULT_MODEL_FILENAME = "/tmp/model.keras"  # cached location
 VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 USE_VGG_PREPROCESS = False  # default; UI lets user change
 TOP_K_DEFAULT = 3
+
+# Logo support: put an image named 'sveri_logo.png' in repo root OR set LOGO_URL to a public URL
+LOGO_FILENAME = "sveri_logo.png"
+LOGO_URL = None  # e.g., "https://example.com/sveri_logo.png"
 
 # -------- Utilities (adapted & improved) --------
 def get_model_input_size(model):
@@ -143,8 +146,31 @@ def get_model_from_drive_or_path(drive_file_id: str = DRIVE_FILE_ID_DEFAULT, loc
     return model, dest
 
 # -------- Streamlit UI --------
-st.title("Web Application for Sugarcane Age Detection using Drone Imagery")
-st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  \n**Research funding support from:** Rajiv Gandhi Science and Technology Commission, Government of Maharashtra")
+# Title + logo (if available)
+col1, col2 = st.columns([1, 5])
+logo_displayed = False
+with col1:
+    # try local logo then URL
+    if Path(LOGO_FILENAME).exists():
+        try:
+            st.image(str(LOGO_FILENAME), width=120)
+            logo_displayed = True
+        except Exception:
+            logo_displayed = False
+    elif LOGO_URL:
+        try:
+            st.image(LOGO_URL, width=120)
+            logo_displayed = True
+        except Exception:
+            logo_displayed = False
+
+with col2:
+    st.markdown("## Web Application for Sugarcane Age Detection using Drone Imagery")
+    st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  ")
+    st.markdown("**Research funding support from:** Rajiv Gandhi Science and Technology Commission, Government of Maharashtra")
+    if not logo_displayed:
+        st.markdown("_(Place `sveri_logo.png` in the app repository root or set `LOGO_URL` in the script to display the logo.)_")
+
 st.markdown("---")
 
 # Brief model summary paragraph requested by user
@@ -236,8 +262,8 @@ if uploaded:
                         try:
                             res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
                             results_all[str(imgp)] = res
-                            # display image at half size (improve look)
-                            display_width = max(32, pil.width // 2)
+                            # display image at half size, capped for nicer layout
+                            display_width = min(400, max(64, pil.width // 2))
                             st.image(pil, caption=f"{imgp.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
                             for rank, (idx, name, p) in enumerate(res, start=1):
                                 st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
@@ -253,7 +279,7 @@ if uploaded:
             try:
                 res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
                 results_all[up.name] = res
-                display_width = max(32, pil.width // 2)
+                display_width = min(400, max(64, pil.width // 2))
                 st.image(pil, caption=f"{up.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
                 for rank, (idx, name, p) in enumerate(res, start=1):
                     st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
@@ -277,3 +303,8 @@ if uploaded:
 
 else:
     st.info("No files uploaded yet. Upload images or a zip to start predictions.")
+
+# Footer / Contact
+st.markdown("---")
+st.markdown("**Project PI / Contact:** Dr. Prashant M. Pawar (SVERI's COEP, Pandharpur)")
+st.markdown("For project details and data requests, please contact the department.")
