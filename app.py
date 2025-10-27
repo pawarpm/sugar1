@@ -16,27 +16,36 @@ warnings.filterwarnings("ignore")
 
 import streamlit as st
 from scipy.special import softmax
-
-# Import TensorFlow / Keras after suppression flags
 import tensorflow as tf
 from tensorflow.keras.models import load_model
-import gdown  # to download shared file from Google Drive
+import gdown  # download shared file from Google Drive
 
 # Streamlit config
-st.set_page_config(page_title="Web Application for Sugarcane Age Detection using Drone Imagery", layout="wide")
+st.set_page_config(
+    page_title="Web Application for Sugarcane Age Detection using Drone Imagery",
+    layout="wide"
+)
 
 # -------- Configuration --------
 DRIVE_FILE_ID_DEFAULT = "10JYTIb9CWNhGbhnBNEA1Yj8SVVqx5BjE"
-DEFAULT_MODEL_FILENAME = "/tmp/model.keras"  # cached location
+DEFAULT_MODEL_FILENAME = "/tmp/model.keras"
 VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
-USE_VGG_PREPROCESS = False  # default; UI lets user change
+USE_VGG_PREPROCESS = False
 TOP_K_DEFAULT = 3
 
-# Logo support: put an image named 'sveri_logo.png' in repo root OR set LOGO_URL to a public URL
-LOGO_FILENAME = "sveri_logo.png"
-LOGO_URL = None  # e.g., "https://example.com/sveri_logo.png"
+# Default mapping
+DEFAULT_CLASS_MAP = {
+    0: "11_month",
+    1: "2_month",
+    2: "4_month",
+    3: "6_month",
+    4: "9_month"
+}
 
-# -------- Utilities (adapted & improved) --------
+# SVERI Logo URL
+LOGO_URL = "https://coe.sveri.ac.in/wp-content/themes/SVERICoE/images/sverilogo.png"
+
+# -------- Utility Functions --------
 def get_model_input_size(model):
     shape = getattr(model, "input_shape", None)
     if isinstance(shape, list):
@@ -79,6 +88,18 @@ def build_default_class_map(model, prefix="class_"):
     else:
         return {i: f"{prefix}{i}" for i in range(n)}
 
+def sanitize_mapping(raw_map):
+    if not isinstance(raw_map, dict):
+        return None
+    out = {}
+    for k, v in raw_map.items():
+        try:
+            ik = int(k)
+        except Exception:
+            return None
+        out[int(ik)] = str(v)
+    return out
+
 def preprocess_image_for_model_bytes(img_bytes, model, use_vgg=USE_VGG_PREPROCESS):
     expected_h, expected_w, expected_c = get_model_input_size(model)
     pil = Image.open(BytesIO(img_bytes)).convert("RGB")
@@ -100,22 +121,11 @@ def predict_from_bytes(model, img_bytes, class_map=None, top_k=3, use_vgg=USE_VG
     if isinstance(preds, (list, tuple)):
         preds = preds[0]
     preds = preds[0] if (hasattr(preds, "ndim") and preds.ndim == 2 and preds.shape[0] == 1) else preds
-    try:
-        if preds.sum() > 1.0001 or preds.min() < 0:
-            probs = softmax(preds)
-        else:
-            probs = preds
-    except Exception:
-        probs = preds
+    probs = softmax(preds) if preds.sum() > 1.0001 or preds.min() < 0 else preds
     top_idx = probs.argsort()[-top_k:][::-1]
-    results = [(int(idx), class_map.get(int(idx), f"class_{idx}") if class_map else f"class_{idx}", float(probs[idx]))
-               for idx in top_idx]
+    results = [(int(idx), class_map.get(int(idx), f"class_{idx}"), float(probs[idx])) for idx in top_idx]
     return results, pil_img
 
-def is_image_filename(fname: str):
-    return fname.lower().endswith(VALID_IMG_EXTS)
-
-# -------- Model loading helpers --------
 def download_from_gdrive(file_id: str, dest_path: str, force=False):
     dest = Path(dest_path)
     if dest.exists() and not force:
@@ -124,187 +134,131 @@ def download_from_gdrive(file_id: str, dest_path: str, force=False):
     gdown.download(url, str(dest), quiet=False)
     return str(dest)
 
-def load_model_preferred(path, convert_h5_to_keras=True, compile=False, custom_objects=None):
+def load_model_preferred(path, convert_h5_to_keras=True, compile=False):
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Model file not found: {path}")
-    ext = p.suffix.lower()
-    if ext == ".keras":
-        return load_model(str(p), compile=compile, custom_objects=custom_objects)
-    elif ext == ".h5" and convert_h5_to_keras:
-        model = load_model(str(p), compile=compile, custom_objects=custom_objects)
+    if p.suffix.lower() == ".keras":
+        return load_model(str(p), compile=compile)
+    elif p.suffix.lower() == ".h5" and convert_h5_to_keras:
+        model = load_model(str(p), compile=compile)
         keras_path = str(p.with_suffix(".keras"))
         model.save(keras_path)
-        return load_model(keras_path, compile=compile, custom_objects=custom_objects)
+        return load_model(keras_path, compile=compile)
     else:
-        return load_model(str(p), compile=compile, custom_objects=custom_objects)
+        return load_model(str(p), compile=compile)
 
 @st.cache_resource(show_spinner=False)
-def get_model_from_drive_or_path(drive_file_id: str = DRIVE_FILE_ID_DEFAULT, local_path: str = DEFAULT_MODEL_FILENAME, force_download=False):
-    dest = download_from_gdrive(drive_file_id, local_path, force=force_download)
-    model = load_model_preferred(dest, convert_h5_to_keras=True, compile=False, custom_objects=None)
+def get_model_from_drive(drive_file_id=DRIVE_FILE_ID_DEFAULT, local_path=DEFAULT_MODEL_FILENAME, force=False):
+    dest = download_from_gdrive(drive_file_id, local_path, force=force)
+    model = load_model_preferred(dest, compile=False)
     return model, dest
 
 # -------- Streamlit UI --------
-# Title + logo (if available)
+# Header section with logo and title
 col1, col2 = st.columns([1, 5])
-logo_displayed = False
 with col1:
-    # try local logo then URL
-    if Path(LOGO_FILENAME).exists():
-        try:
-            st.image(str(LOGO_FILENAME), width=120)
-            logo_displayed = True
-        except Exception:
-            logo_displayed = False
-    elif LOGO_URL:
-        try:
-            st.image(LOGO_URL, width=120)
-            logo_displayed = True
-        except Exception:
-            logo_displayed = False
+    st.image(LOGO_URL, width=130)
 
 with col2:
     st.markdown("## Web Application for Sugarcane Age Detection using Drone Imagery")
     st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  ")
     st.markdown("**Research funding support from:** Rajiv Gandhi Science and Technology Commission, Government of Maharashtra")
-    if not logo_displayed:
-        st.markdown("_(Place `sveri_logo.png` in the app repository root or set `LOGO_URL` in the script to display the logo.)_")
 
 st.markdown("---")
 
-# Brief model summary paragraph requested by user
+# About model
 st.markdown(
     """
 **About the Model (brief):**
 
-This application uses a MobileNet backbone (MobileNetV2-style) fine-tuned on drone imagery of sugarcane fields.
-The model was trained to classify sugarcane crop age into discrete classes (for example: 2_month, 4_month, 6_month, 9_month, 11_month).
-The trained MobileNet features are followed by a custom classification head (dense layer(s) and a final softmax classification layer).
-The app downloads the inference `.keras` model from a provided Google Drive link, runs predictions on uploaded images (or ZIPs of images),
-and returns top-K predicted age classes with probabilities.
+This application uses a **MobileNetV2 backbone** fine-tuned on drone imagery of sugarcane fields.
+It classifies sugarcane crop age into stages such as *2, 4, 6, 9,* and *11 months*.
+The final layer is a dense classification head using Softmax activation.
+The model was trained using annotated drone datasets collected across multiple farms.
 """
 )
 
+# Sidebar: model and settings
 with st.sidebar:
     st.header("Model / Prediction Settings")
-    drive_id = st.text_input("Google Drive file id (share link id)", value=DRIVE_FILE_ID_DEFAULT)
-    model_dest = st.text_input("Local model path", value=DEFAULT_MODEL_FILENAME)
+    drive_id = st.text_input("Google Drive File ID", value=DRIVE_FILE_ID_DEFAULT)
+    model_dest = st.text_input("Local Model Path", value=DEFAULT_MODEL_FILENAME)
     force_dl = st.checkbox("Force re-download model", value=False)
     top_k = st.number_input("Top K predictions", min_value=1, max_value=10, value=TOP_K_DEFAULT)
-    use_vgg = st.checkbox("Use VGG preprocessing instead of /255.0", value=USE_VGG_PREPROCESS)
-
-    st.markdown("---")
-    st.markdown("**Class map (optional)** — JSON-like mapping `index: label` (example):")
-    st.code('{\n  0: "11_month",\n  1: "2_month",\n  2: "4_month",\n  3: "6_month",\n  4: "9_month"\n}')
-    custom_map_text = st.text_area("Paste mapping (leave empty to auto)", height=100)
-    if custom_map_text.strip():
-        try:
-            class_map = eval(custom_map_text.strip(), {})
-            if not isinstance(class_map, dict):
-                st.warning("Mapping is not a dict. Falling back to auto map.")
-                class_map = None
-        except Exception as e:
-            st.warning(f"Could not parse mapping: {e}. Falling back to auto map.")
-            class_map = None
-    else:
-        class_map = None
+    use_vgg = st.checkbox("Use VGG preprocessing (/255.0 off)", value=USE_VGG_PREPROCESS)
 
 # Load model
-with st.spinner("Downloading and loading model (if needed)..."):
+with st.spinner("Downloading and loading model..."):
     try:
-        model, model_path = get_model_from_drive_or_path(drive_file_id=drive_id, local_path=model_dest, force_download=force_dl)
+        model, model_path = get_model_from_drive(drive_file_id=drive_id, local_path=model_dest, force=force_dl)
+        st.success(f"✅ Model loaded successfully from: {model_path}")
     except Exception as e:
-        st.error(f"Failed to download or load model: {e}")
+        st.error(f"Failed to load model: {e}")
         st.stop()
 
-st.success(f"Model loaded from: {model_path}")
+# Apply class map automatically
+model_classes = infer_num_classes_from_model(model)
+if model_classes == len(DEFAULT_CLASS_MAP):
+    class_map = DEFAULT_CLASS_MAP
+    st.info("Using default sugarcane age mapping.")
+else:
+    class_map = build_default_class_map(model)
+    st.warning("Default mapping size mismatch; using generic labels.")
 
-# Show readable model summary inside an expander (capture from model.summary())
-with st.expander("Model summary (click to expand)"):
-    s = StringIO()
-    try:
-        model.summary(print_fn=lambda x: s.write(x + "\n"))
-        st.text(s.getvalue())
-    except Exception as e:
-        st.text(f"Could not display model summary: {e}")
-
-# Files input
-st.header("Upload files")
-st.write("Upload single/multiple images or a single ZIP file containing images.")
-uploaded = st.file_uploader("Choose images or a ZIP", accept_multiple_files=True, type=["jpg","jpeg","png","bmp","tiff","zip"])
+# Upload section
+st.header("Upload Images or ZIP Folder")
+uploaded = st.file_uploader("Select one or more images, or a ZIP folder", accept_multiple_files=True, type=["jpg","jpeg","png","bmp","tiff","zip"])
 
 if uploaded:
     results_all = {}
     for up in uploaded:
-        # Handle zip
         if up.name.lower().endswith(".zip"):
             tmpdir = tempfile.mkdtemp()
             zpath = Path(tmpdir) / up.name
             with open(zpath, "wb") as f:
                 f.write(up.getvalue())
-            try:
-                with zipfile.ZipFile(zpath, "r") as z:
-                    z.extractall(tmpdir)
-                # collect image files
-                imgs = []
-                for root, _, files in os.walk(tmpdir):
-                    for f in files:
-                        if is_image_filename(f):
-                            imgs.append(Path(root) / f)
-                if not imgs:
-                    st.warning(f"No images found inside {up.name}")
-                else:
-                    st.info(f"Classifying {len(imgs)} images from {up.name} ...")
-                    for imgp in imgs:
-                        with open(imgp, "rb") as f:
-                            b = f.read()
-                        try:
-                            res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
-                            results_all[str(imgp)] = res
-                            # display image at half size, capped for nicer layout
-                            display_width = min(400, max(64, pil.width // 2))
-                            st.image(pil, caption=f"{imgp.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
-                            for rank, (idx, name, p) in enumerate(res, start=1):
-                                st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
-                            st.markdown("---")
-                        except Exception as e:
-                            st.error(f"Prediction failed for {imgp.name}: {e}")
-            except Exception as e:
-                st.error(f"Failed to extract or process zip {up.name}: {e}")
+            with zipfile.ZipFile(zpath, "r") as z:
+                z.extractall(tmpdir)
+            imgs = [str(x) for x in Path(tmpdir).rglob("*") if x.suffix.lower() in VALID_IMG_EXTS]
+        else:
+            imgs = [up]
 
-        # Single image file
-        elif is_image_filename(up.name):
-            b = up.getvalue()
+        for img in imgs:
             try:
+                b = img.read() if hasattr(img, "read") else open(img, "rb").read()
                 res, pil = predict_from_bytes(model, b, class_map=class_map, top_k=top_k, use_vgg=use_vgg)
-                results_all[up.name] = res
+                results_all[img] = res
                 display_width = min(400, max(64, pil.width // 2))
-                st.image(pil, caption=f"{up.name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
+                st.image(pil, caption=f"{Path(img).name} — Top: {res[0][1]} ({res[0][2]:.3f})", width=display_width)
                 for rank, (idx, name, p) in enumerate(res, start=1):
-                    st.write(f"{rank}. {name} (idx {idx}) — {p:.4f}")
+                    st.write(f"{rank}. {name} — {p:.4f}")
                 st.markdown("---")
             except Exception as e:
-                st.error(f"Prediction failed for {up.name}: {e}")
-        else:
-            st.warning(f"Skipping file {up.name} — unsupported type.")
+                st.error(f"Prediction failed for {Path(img).name}: {e}")
+    st.success("✅ Classification complete.")
 
-    st.success("Done classifying uploaded files.")
-    # Optionally show results as CSV download
-    if st.button("Download results (CSV)"):
+    # Download results CSV
+    if st.button("Download Results (CSV)"):
         import pandas as pd
         rows = []
         for fname, res in results_all.items():
             for rank, (idx, name, p) in enumerate(res, start=1):
-                rows.append({"file": fname, "rank": rank, "idx": idx, "label": name, "prob": p})
+                rows.append({"file": Path(fname).name, "rank": rank, "label": name, "probability": p})
         df = pd.DataFrame(rows)
         csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV", csv, file_name="predictions.csv", mime="text/csv")
+        st.download_button("Download CSV", csv, "predictions.csv", "text/csv")
 
 else:
-    st.info("No files uploaded yet. Upload images or a zip to start predictions.")
+    st.info("Please upload images or a ZIP file to begin classification.")
 
-# Footer / Contact
+# Footer
 st.markdown("---")
-st.markdown("**Project PI / Contact:** Dr. Prashant M. Pawar (SVERI's COEP, Pandharpur)")
-st.markdown("For project details and data requests, please contact the department.")
+st.markdown(
+    """
+**Project PI / Contact:**  
+Dr. Prashant Maruti Pawar  
+SVERI's College of Engineering, Pandharpur  
+For collaboration or data access, please contact the institute.
+"""
+)
