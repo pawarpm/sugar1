@@ -22,7 +22,7 @@ import gdown  # download shared file from Google Drive
 
 # Streamlit config
 st.set_page_config(
-    page_title="Web Application for Sugarcane Age Detection using Drone Imagery",
+    page_title="Web Application for Sugarcane Age Detection using Drone Imagery (V2)",
     layout="wide"
 )
 
@@ -161,7 +161,7 @@ with col1:
     st.image(LOGO_URL, width=130)
 
 with col2:
-    st.markdown("## Web Application for Sugarcane Age Detection using Drone Imagery")
+    st.markdown("## Web Application for Sugarcane Age Detection using Drone Imagery(V2)")
     st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  ")
     st.markdown("**Research funding support from:** Rajiv Gandhi Science and Technology Commission, Government of Maharashtra")
 
