@@ -9,8 +9,8 @@ import numpy as np
 import tempfile
 
 # Suppress noisy logs/warnings before importing TensorFlow
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # hide INFO/WARNING from TF
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # <<< force CPU; prevents CUDA init error
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"   # <<< hide INFO/WARNING/ERROR from TF C++ logs
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # <<< force CPU; prevents CUDA init
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore")
 
@@ -18,41 +18,32 @@ import streamlit as st
 from scipy.special import softmax
 import tensorflow as tf
 from tensorflow.keras.models import load_model
-import gdown  # download shared file from Google Drive
+import gdown
 from collections import Counter
 
-# Also make sure TF doesn't try to use any GPU even if present
+# Also ensure TF doesn't try GPU even if present
 try:
     tf.config.set_visible_devices([], "GPU")
 except Exception:
     pass
 
-# Streamlit config (unchanged)
+# ---- Streamlit config (unchanged) ----
 st.set_page_config(
     page_title="Web Application for Sugarcane Age Detection using Drone Imagery",
     layout="wide"
 )
 
-# -------- Configuration (unchanged) --------
+# ---- Configuration (unchanged) ----
 DRIVE_FILE_ID_DEFAULT = "10JYTIb9CWNhGbhnBNEA1Yj8SVVqx5BjE"
 DEFAULT_MODEL_FILENAME = "/tmp/model.keras"
 VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 USE_VGG_PREPROCESS = False
 TOP_K_DEFAULT = 3
 
-# Default mapping
-DEFAULT_CLASS_MAP = {
-    0: "11_month",
-    1: "2_month",
-    2: "4_month",
-    3: "6_month",
-    4: "9_month"
-}
-
-# SVERI Logo URL
+DEFAULT_CLASS_MAP = {0:"11_month",1:"2_month",2:"4_month",3:"6_month",4:"9_month"}
 LOGO_URL = "https://coe.sveri.ac.in/wp-content/themes/SVERICoE/images/sverilogo.png"
 
-# -------- Utility Functions (unchanged logic) --------
+# ---- Utils (unchanged logic) ----
 def get_model_input_size(model):
     shape = getattr(model, "input_shape", None)
     if isinstance(shape, list):
@@ -61,10 +52,7 @@ def get_model_input_size(model):
         return (240, 240, 3)
     if len(shape) == 4:
         _, h, w, c = shape
-        h = int(h) if (h is not None) else 240
-        w = int(w) if (w is not None) else 240
-        c = int(c) if (c is not None) else 3
-        return (h, w, c)
+        return (int(h) if h else 240, int(w) if w else 240, int(c) if c else 3)
     return (240, 240, 3)
 
 def infer_num_classes_from_model(model):
@@ -90,10 +78,7 @@ def infer_num_classes_from_model(model):
 
 def build_default_class_map(model, prefix="class_"):
     n = infer_num_classes_from_model(model)
-    if n is None:
-        return {}
-    else:
-        return {i: f"{prefix}{i}" for i in range(n)}
+    return {} if n is None else {i: f"{prefix}{i}" for i in range(n)}
 
 def preprocess_image_for_model_bytes(img_bytes, model, use_vgg=USE_VGG_PREPROCESS):
     expected_h, expected_w, expected_c = get_model_input_size(model)
@@ -111,7 +96,7 @@ def preprocess_image_for_model_bytes(img_bytes, model, use_vgg=USE_VGG_PREPROCES
 def predict_from_bytes(model, img_bytes, class_map=None, top_k=3, use_vgg=USE_VGG_PREPROCESS):
     if class_map is None:
         class_map = build_default_class_map(model)
-    x, pil_img, used_size = preprocess_image_for_model_bytes(img_bytes, model, use_vgg=use_vgg)
+    x, pil_img, _ = preprocess_image_for_model_bytes(img_bytes, model, use_vgg=use_vgg)
     preds = model.predict(x, verbose=0)
     if isinstance(preds, (list, tuple)):
         preds = preds[0]
@@ -149,33 +134,25 @@ def get_model_from_drive(drive_file_id=DRIVE_FILE_ID_DEFAULT, local_path=DEFAULT
     model = load_model_preferred(dest, compile=False)
     return model, dest
 
-# NEW: batched prediction helper (avoids huge single arrays)
 def predict_in_batches(model, batch_array, batch_size=64):
-    """
-    batch_array: np.ndarray of shape (N, H, W, C)
-    returns probs: np.ndarray of shape (N, num_classes)
-    """
     n = batch_array.shape[0]
     outs = []
     for i in range(0, n, batch_size):
         chunk = batch_array[i:i+batch_size]
         pred = model.predict(chunk, verbose=0)
         pred = pred[0] if (hasattr(pred, "ndim") and pred.ndim == 3 and pred.shape[0] == 1) else pred
-        # convert to probabilities if needed
         try:
             if pred.sum(axis=1).max() > 1.0001 or pred.min() < 0:
                 pred = softmax(pred, axis=1)
         except Exception:
             pass
         outs.append(pred)
-    probs = np.concatenate(outs, axis=0)
-    return probs
+    return np.concatenate(outs, axis=0)
 
-# -------- Streamlit UI (header unchanged) --------
+# ---- Header (unchanged) ----
 col1, col2 = st.columns([1, 5])
 with col1:
     st.image(LOGO_URL, width=130)
-
 with col2:
     st.markdown("## Web Application for Sugarcane Age Detection using Drone Imagery")
     st.markdown("**Developed by:** SVERI's College of Engineering, Pandharpur  ")
@@ -183,7 +160,7 @@ with col2:
 
 st.markdown("---")
 
-# About model (unchanged)
+# ---- About (unchanged) ----
 st.markdown(
     """
 **About the Model (brief):**
@@ -195,7 +172,7 @@ The model was trained using annotated drone datasets collected across multiple f
 """
 )
 
-# Sidebar (unchanged)
+# ---- Sidebar (unchanged) ----
 with st.sidebar:
     st.header("Model / Prediction Settings")
     drive_id = st.text_input("Google Drive File ID", value=DRIVE_FILE_ID_DEFAULT)
@@ -204,7 +181,7 @@ with st.sidebar:
     top_k = st.number_input("Top K predictions", min_value=1, max_value=10, value=TOP_K_DEFAULT)
     use_vgg = st.checkbox("Use VGG preprocessing (/255.0 off)", value=USE_VGG_PREPROCESS)
 
-# Load model (unchanged)
+# ---- Load model (unchanged) ----
 with st.spinner("Downloading and loading model..."):
     try:
         model, model_path = get_model_from_drive(drive_file_id=drive_id, local_path=model_dest, force=force_dl)
@@ -213,16 +190,12 @@ with st.spinner("Downloading and loading model..."):
         st.error(f"Failed to load model: {e}")
         st.stop()
 
-# Apply class map automatically (unchanged)
+# ---- Class map (unchanged) ----
 model_classes = infer_num_classes_from_model(model)
-if model_classes == len(DEFAULT_CLASS_MAP):
-    class_map = DEFAULT_CLASS_MAP
-    st.info("Using default sugarcane age mapping.")
-else:
-    class_map = build_default_class_map(model)
-    st.warning("Default mapping size mismatch; using generic labels.")
+class_map = DEFAULT_CLASS_MAP if (model_classes == len(DEFAULT_CLASS_MAP)) else build_default_class_map(model)
+st.info("Using default sugarcane age mapping." if class_map == DEFAULT_CLASS_MAP else "Default mapping size mismatch; using generic labels.")
 
-# ----------------- Single stitched-image uploader only -----------------
+# ---- Stitched image flow (unchanged functionality; minor param rename) ----
 st.header("Upload a single stitched farm image (JPEG/PNG)")
 stitched_file = st.file_uploader("Upload stitched image (one file only)", accept_multiple_files=False, type=["jpg", "jpeg", "png"])
 
@@ -234,32 +207,28 @@ if stitched_file is not None:
         stitched_image = None
 
     if stitched_image is not None:
-        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", use_column_width=True)
+        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", use_container_width=True)  # << replaced
         st.write("---")
         st.write("### Tiling stitched image into 160x160 crops and classifying tiles...")
 
-        # Tiling logic (full tiles only)
         crop_size = 160
         width, height = stitched_image.size
-        cropped_images = []
-        crop_boxes = []
+        cropped_images, crop_boxes = [], []
         for y in range(0, height, crop_size):
             for x in range(0, width, crop_size):
                 if x + crop_size <= width and y + crop_size <= height:
                     box = (x, y, x + crop_size, y + crop_size)
-                    crop = stitched_image.crop(box)
-                    cropped_images.append(crop)
+                    cropped_images.append(stitched_image.crop(box))
                     crop_boxes.append(box)
 
         if not cropped_images:
             st.warning("The stitched image is smaller than 160x160 and could not be tiled.")
         else:
-            # Build batched input (resized to model input) and predict in chunks
-            inp_h, inp_w, inp_c = get_model_input_size(model)
+            inp_h, inp_w, _ = get_model_input_size(model)
             def gen_batch():
                 for crop in cropped_images:
-                    crop_resized = crop.resize((inp_w, inp_h), Image.BILINEAR)
-                    arr = np.array(crop_resized).astype("float32")
+                    cr = crop.resize((inp_w, inp_h), Image.BILINEAR)
+                    arr = np.array(cr).astype("float32")
                     if use_vgg:
                         from tensorflow.keras.applications.vgg16 import preprocess_input
                         arr = preprocess_input(arr)
@@ -273,52 +242,38 @@ if stitched_file is not None:
             predicted_indices = np.argmax(probs, axis=1)
             predicted_labels = [class_map.get(int(idx), f"class_{idx}") for idx in predicted_indices]
 
-            # Count and percentage
             counts = Counter(predicted_labels)
             total_tiles = len(cropped_images)
 
             st.subheader("✅ Overall Prediction Summary")
-            col1, col2 = st.columns(2)
-            most_common_label, most_common_count = counts.most_common(1)[0]
-            with col1:
-                st.metric("Final Predicted Age (Majority Vote)", most_common_label)
-            with col2:
-                st.metric("Number of Tiles Analyzed", total_tiles)
+            c1, c2 = st.columns(2)
+            (major_lbl, major_cnt) = counts.most_common(1)[0]
+            with c1: st.metric("Final Predicted Age (Majority Vote)", major_lbl)
+            with c2: st.metric("Number of Tiles Analyzed", total_tiles)
 
             st.write("#### Prediction Breakdown (tile counts and percentage of field):")
             for lbl, cnt in counts.items():
-                pct = (cnt / total_tiles) * 100
-                st.write(f"- **{lbl}:** {cnt} tiles — **{pct:.2f}%** of field")
+                st.write(f"- **{lbl}:** {cnt} tiles — **{(cnt/total_tiles)*100:.2f}%** of field")
 
             st.write("---")
 
-            # -------- Overlay map (unchanged) --------
+            # ---- Overlay map ----
             overlay = Image.new("RGBA", stitched_image.size, (0,0,0,0))
             draw = ImageDraw.Draw(overlay)
             palette = [
-                (31,119,180,140),
-                (255,127,14,140),
-                (44,160,44,140),
-                (214,39,40,140),
-                (148,103,189,140),
-                (140,86,75,140),
-                (227,119,194,140),
-                (127,127,127,140),
+                (31,119,180,140),(255,127,14,140),(44,160,44,140),
+                (214,39,40,140),(148,103,189,140),(140,86,75,140),
+                (227,119,194,140),(127,127,127,140),
             ]
-            # Deterministic label->color mapping
             label_to_color = {}
             for i, lbl in enumerate(sorted(list(set(class_map.values())))):
                 label_to_color[lbl] = palette[i % len(palette)]
-
             for box, lbl in zip(crop_boxes, predicted_labels):
-                color = label_to_color.get(lbl, (0,0,0,120))
-                draw.rectangle(box, fill=color, outline=None)
+                draw.rectangle(box, fill=label_to_color.get(lbl, (0,0,0,120)), outline=None)
 
-            stitched_rgba = stitched_image.convert("RGBA")
-            composited = Image.alpha_composite(stitched_rgba, overlay)
-
+            composited = Image.alpha_composite(stitched_image.convert("RGBA"), overlay)
             st.subheader("Spatial Overlay Map (tiles colored by predicted class)")
-            st.image(composited, caption="Overlay: semi-transparent tile predictions", use_column_width=True)
+            st.image(composited, caption="Overlay: semi-transparent tile predictions", use_container_width=True)  # << replaced
 
             # Legend
             st.write("#### Legend and Percentages")
@@ -333,44 +288,38 @@ if stitched_file is not None:
 
             st.write("---")
 
-            # Individual tiles grid
+            # Individual tiles
             st.subheader("Individual Tile Analysis")
-            num_columns = 4
-            cols = st.columns(num_columns)
+            cols = st.columns(4)
             for i, (crop, prob_row) in enumerate(zip(cropped_images, probs)):
-                col = cols[i % num_columns]
+                col = cols[i % 4]
                 pred_idx = int(np.argmax(prob_row))
                 pred_label = class_map.get(pred_idx, f"class_{pred_idx}")
                 confidence = float(np.max(prob_row))
                 with col:
-                    display_width = min(200, max(64, crop.width // 2))
-                    st.image(crop, caption=f"Tile #{i+1}", width=display_width)
+                    st.image(crop, caption=f"Tile #{i+1}", width=min(200, max(64, crop.width // 2)))
                     st.success(f"Prediction: {pred_label} ({confidence:.3f})")
 
-            # CSV with tile coords
+            # CSV
             rows = []
             for i, (box, prob_row) in enumerate(zip(crop_boxes, probs), start=1):
                 x0,y0,x1,y1 = box
                 pred_idx = int(np.argmax(prob_row))
                 pred_label = class_map.get(pred_idx, f"class_{pred_idx}")
-                prob_val = float(np.max(prob_row))
                 rows.append({
-                    "tile_id": i,
-                    "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
-                    "predicted_label": pred_label,
-                    "probability": prob_val
+                    "tile_id": i, "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+                    "predicted_label": pred_label, "probability": float(np.max(prob_row))
                 })
-
             if st.button("Download Results (CSV)"):
                 import pandas as pd
                 df = pd.DataFrame(rows)
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button("Download CSV", csv, "stitched_predictions.csv", "text/csv")
+                st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"),
+                                   "stitched_predictions.csv", "text/csv")
 
 else:
     st.info("Please upload a single stitched image (JPEG/PNG) to begin classification.")
 
-# Footer (unchanged)
+# ---- Footer (unchanged) ----
 st.markdown("---")
 st.markdown(
     """
@@ -378,5 +327,6 @@ st.markdown(
 Dr. Prashant Maruti Pawar  
 SVERI's College of Engineering, Pandharpur  
 For collaboration or data access, please contact the institute.
+The code update date 04/11/2025 and update: v3
 """
 )
