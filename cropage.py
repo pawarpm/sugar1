@@ -43,7 +43,7 @@ DEFAULT_MODEL_FILENAME = "/tmp/model.keras"
 VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 USE_VGG_PREPROCESS = False
 TOP_K_DEFAULT = 3
-TILE_SIZE = 160             # crop size
+TILE_SIZE = 224             # crop size
 BATCH_SIZE = 64             # safe default; adjust if needed
 MAX_TILE_THUMBNAILS = 40    # limit thumbnails in grid to keep UI snappy
 
@@ -126,7 +126,7 @@ def preprocess_tile_for_model(pil_img, target_hw, use_vgg=False):
         arr = arr / 255.0
     return arr
 
-def predict_tiles_streaming(model, stitched_image, crop_size=160, batch_size=64, use_vgg=False):
+def predict_tiles_streaming(model, stitched_image, crop_size=224, batch_size=64, use_vgg=False):
     """Yield probs for tiles without storing all tiles in memory."""
     inp_h, inp_w, _ = get_model_input_size(model)
     width, height = stitched_image.size
@@ -221,7 +221,7 @@ if stitched_file is not None:
     if stitched_image is not None:
         st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", width="stretch")
         st.write("---")
-        st.write("### Tiling stitched image into 160x160 crops and classifying tiles...")
+        st.write("### Converting stitched image into 224X224 crops and classifying tiles...")
 
         try:
             # Streamed tile prediction (no giant arrays)
@@ -231,7 +231,7 @@ if stitched_file is not None:
             )
 
             if len(boxes) == 0:
-                st.warning("The stitched image is smaller than 160x160 and could not be tiled.")
+                st.warning("The stitched image is smaller than 224X224 and could not be tiled.")
             else:
                 predicted_indices = np.argmax(probs, axis=1)
                 predicted_labels = [class_map.get(int(idx), f"class_{idx}") for idx in predicted_indices]
