@@ -207,7 +207,8 @@ if stitched_file is not None:
         stitched_image = None
 
     if stitched_image is not None:
-        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", use_container_width=True)  # << replaced
+#        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", use_container_width=True)  # << replaced
+        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", width="stretch")
         st.write("---")
         st.write("### Tiling stitched image into 160x160 crops and classifying tiles...")
 
@@ -273,7 +274,8 @@ if stitched_file is not None:
 
             composited = Image.alpha_composite(stitched_image.convert("RGBA"), overlay)
             st.subheader("Spatial Overlay Map (tiles colored by predicted class)")
-            st.image(composited, caption="Overlay: semi-transparent tile predictions", use_container_width=True)  # << replaced
+#            st.image(composited, caption="Overlay: semi-transparent tile predictions", use_container_width=True)  # << replaced
+            st.image(composited, caption="Overlay: semi-transparent tile predictions", width="stretch")
 
             # Legend
             st.write("#### Legend and Percentages")
