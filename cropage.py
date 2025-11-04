@@ -4,13 +4,17 @@ import logging
 import warnings
 from pathlib import Path
 from io import BytesIO, StringIO
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFile
 import numpy as np
 import tempfile
 
+# --- PIL safety for very large images ---
+Image.MAX_IMAGE_PIXELS = None                # allow very large stitched images
+ImageFile.LOAD_TRUNCATED_IMAGES = True       # load even if slightly truncated
+
 # Suppress noisy logs/warnings before importing TensorFlow
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"   # <<< hide INFO/WARNING/ERROR from TF C++ logs
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # <<< force CPU; prevents CUDA init
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"     # hide INFO/WARNING/ERROR from TF C++ logs
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"    # force CPU; prevents CUDA init attempts
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore")
 
@@ -39,6 +43,9 @@ DEFAULT_MODEL_FILENAME = "/tmp/model.keras"
 VALID_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 USE_VGG_PREPROCESS = False
 TOP_K_DEFAULT = 3
+TILE_SIZE = 160             # crop size
+BATCH_SIZE = 64             # safe default; adjust if needed
+MAX_TILE_THUMBNAILS = 40    # limit thumbnails in grid to keep UI snappy
 
 DEFAULT_CLASS_MAP = {0:"11_month",1:"2_month",2:"4_month",3:"6_month",4:"9_month"}
 LOGO_URL = "https://coe.sveri.ac.in/wp-content/themes/SVERICoE/images/sverilogo.png"
@@ -80,32 +87,6 @@ def build_default_class_map(model, prefix="class_"):
     n = infer_num_classes_from_model(model)
     return {} if n is None else {i: f"{prefix}{i}" for i in range(n)}
 
-def preprocess_image_for_model_bytes(img_bytes, model, use_vgg=USE_VGG_PREPROCESS):
-    expected_h, expected_w, expected_c = get_model_input_size(model)
-    pil = Image.open(BytesIO(img_bytes)).convert("RGB")
-    pil_resized = pil.resize((expected_w, expected_h), Image.BILINEAR)
-    x = np.array(pil_resized).astype("float32")
-    if use_vgg:
-        from tensorflow.keras.applications.vgg16 import preprocess_input
-        x = preprocess_input(x)
-    else:
-        x = x / 255.0
-    x = np.expand_dims(x, axis=0)
-    return x, pil_resized, (expected_h, expected_w, expected_c)
-
-def predict_from_bytes(model, img_bytes, class_map=None, top_k=3, use_vgg=USE_VGG_PREPROCESS):
-    if class_map is None:
-        class_map = build_default_class_map(model)
-    x, pil_img, _ = preprocess_image_for_model_bytes(img_bytes, model, use_vgg=use_vgg)
-    preds = model.predict(x, verbose=0)
-    if isinstance(preds, (list, tuple)):
-        preds = preds[0]
-    preds = preds[0] if (hasattr(preds, "ndim") and preds.ndim == 2 and preds.shape[0] == 1) else preds
-    probs = softmax(preds) if preds.sum() > 1.0001 or preds.min() < 0 else preds
-    top_idx = probs.argsort()[-top_k:][::-1]
-    results = [(int(idx), class_map.get(int(idx), f"class_{idx}"), float(probs[idx])) for idx in top_idx]
-    return results, pil_img
-
 def download_from_gdrive(file_id: str, dest_path: str, force=False):
     dest = Path(dest_path)
     if dest.exists() and not force:
@@ -134,20 +115,51 @@ def get_model_from_drive(drive_file_id=DRIVE_FILE_ID_DEFAULT, local_path=DEFAULT
     model = load_model_preferred(dest, compile=False)
     return model, dest
 
-def predict_in_batches(model, batch_array, batch_size=64):
-    n = batch_array.shape[0]
-    outs = []
+def preprocess_tile_for_model(pil_img, target_hw, use_vgg=False):
+    h, w = target_hw
+    img = pil_img.resize((w, h), Image.BILINEAR)
+    arr = np.array(img).astype("float32")
+    if use_vgg:
+        from tensorflow.keras.applications.vgg16 import preprocess_input
+        arr = preprocess_input(arr)
+    else:
+        arr = arr / 255.0
+    return arr
+
+def predict_tiles_streaming(model, stitched_image, crop_size=160, batch_size=64, use_vgg=False):
+    """Yield probs for tiles without storing all tiles in memory."""
+    inp_h, inp_w, _ = get_model_input_size(model)
+    width, height = stitched_image.size
+
+    # Precompute all full-tile boxes
+    boxes = []
+    for y in range(0, height, crop_size):
+        for x in range(0, width, crop_size):
+            if x + crop_size <= width and y + crop_size <= height:
+                boxes.append((x, y, x + crop_size, y + crop_size))
+
+    n = len(boxes)
+    probs_out = np.zeros((n, infer_num_classes_from_model(model)), dtype="float32")
+    # Process in batches
     for i in range(0, n, batch_size):
-        chunk = batch_array[i:i+batch_size]
-        pred = model.predict(chunk, verbose=0)
+        batch_boxes = boxes[i:i+batch_size]
+        batch_arrs = []
+        for box in batch_boxes:
+            crop = stitched_image.crop(box)
+            arr = preprocess_tile_for_model(crop, (inp_h, inp_w), use_vgg=use_vgg)
+            batch_arrs.append(arr)
+        batch = np.stack(batch_arrs, axis=0)
+        pred = model.predict(batch, verbose=0)
         pred = pred[0] if (hasattr(pred, "ndim") and pred.ndim == 3 and pred.shape[0] == 1) else pred
+        # force probs if needed
         try:
             if pred.sum(axis=1).max() > 1.0001 or pred.min() < 0:
                 pred = softmax(pred, axis=1)
         except Exception:
             pass
-        outs.append(pred)
-    return np.concatenate(outs, axis=0)
+        probs_out[i:i+len(batch_boxes), :] = pred
+
+    return boxes, probs_out
 
 # ---- Header (unchanged) ----
 col1, col2 = st.columns([1, 5])
@@ -195,7 +207,7 @@ model_classes = infer_num_classes_from_model(model)
 class_map = DEFAULT_CLASS_MAP if (model_classes == len(DEFAULT_CLASS_MAP)) else build_default_class_map(model)
 st.info("Using default sugarcane age mapping." if class_map == DEFAULT_CLASS_MAP else "Default mapping size mismatch; using generic labels.")
 
-# ---- Stitched image flow (unchanged functionality; minor param rename) ----
+# ---- Stitched image flow (streaming, memory-safe) ----
 st.header("Upload a single stitched farm image (JPEG/PNG)")
 stitched_file = st.file_uploader("Upload stitched image (one file only)", accept_multiple_files=False, type=["jpg", "jpeg", "png"])
 
@@ -207,116 +219,104 @@ if stitched_file is not None:
         stitched_image = None
 
     if stitched_image is not None:
-#        st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", use_container_width=True)  # << replaced
         st.image(stitched_image, caption=f"Uploaded stitched image: {stitched_file.name}", width="stretch")
         st.write("---")
         st.write("### Tiling stitched image into 160x160 crops and classifying tiles...")
 
-        crop_size = 160
-        width, height = stitched_image.size
-        cropped_images, crop_boxes = [], []
-        for y in range(0, height, crop_size):
-            for x in range(0, width, crop_size):
-                if x + crop_size <= width and y + crop_size <= height:
-                    box = (x, y, x + crop_size, y + crop_size)
-                    cropped_images.append(stitched_image.crop(box))
-                    crop_boxes.append(box)
+        try:
+            # Streamed tile prediction (no giant arrays)
+            crop_size = TILE_SIZE
+            boxes, probs = predict_tiles_streaming(
+                model, stitched_image, crop_size=crop_size, batch_size=BATCH_SIZE, use_vgg=use_vgg
+            )
 
-        if not cropped_images:
-            st.warning("The stitched image is smaller than 160x160 and could not be tiled.")
-        else:
-            inp_h, inp_w, _ = get_model_input_size(model)
-            def gen_batch():
-                for crop in cropped_images:
-                    cr = crop.resize((inp_w, inp_h), Image.BILINEAR)
-                    arr = np.array(cr).astype("float32")
-                    if use_vgg:
-                        from tensorflow.keras.applications.vgg16 import preprocess_input
-                        arr = preprocess_input(arr)
-                    else:
-                        arr = arr / 255.0
-                    yield arr
+            if len(boxes) == 0:
+                st.warning("The stitched image is smaller than 160x160 and could not be tiled.")
+            else:
+                predicted_indices = np.argmax(probs, axis=1)
+                predicted_labels = [class_map.get(int(idx), f"class_{idx}") for idx in predicted_indices]
 
-            batch_array = np.stack(list(gen_batch()), axis=0)
-            probs = predict_in_batches(model, batch_array, batch_size=64)
+                # Count and percentage
+                counts = Counter(predicted_labels)
+                total_tiles = len(boxes)
 
-            predicted_indices = np.argmax(probs, axis=1)
-            predicted_labels = [class_map.get(int(idx), f"class_{idx}") for idx in predicted_indices]
+                st.subheader("✅ Overall Prediction Summary")
+                c1, c2 = st.columns(2)
+                (major_lbl, major_cnt) = counts.most_common(1)[0]
+                with c1: st.metric("Final Predicted Age (Majority Vote)", major_lbl)
+                with c2: st.metric("Number of Tiles Analyzed", total_tiles)
 
-            counts = Counter(predicted_labels)
-            total_tiles = len(cropped_images)
+                st.write("#### Prediction Breakdown (tile counts and percentage of field):")
+                for lbl, cnt in counts.items():
+                    st.write(f"- **{lbl}:** {cnt} tiles — **{(cnt/total_tiles)*100:.2f}%** of field")
 
-            st.subheader("✅ Overall Prediction Summary")
-            c1, c2 = st.columns(2)
-            (major_lbl, major_cnt) = counts.most_common(1)[0]
-            with c1: st.metric("Final Predicted Age (Majority Vote)", major_lbl)
-            with c2: st.metric("Number of Tiles Analyzed", total_tiles)
+                st.write("---")
 
-            st.write("#### Prediction Breakdown (tile counts and percentage of field):")
-            for lbl, cnt in counts.items():
-                st.write(f"- **{lbl}:** {cnt} tiles — **{(cnt/total_tiles)*100:.2f}%** of field")
+                # ---- Overlay map ----
+                overlay = Image.new("RGBA", stitched_image.size, (0,0,0,0))
+                draw = ImageDraw.Draw(overlay)
+                palette = [
+                    (31,119,180,140),(255,127,14,140),(44,160,44,140),
+                    (214,39,40,140),(148,103,189,140),(140,86,75,140),
+                    (227,119,194,140),(127,127,127,140),
+                ]
+                label_to_color = {}
+                for i, lbl in enumerate(sorted(list(set(class_map.values())))):
+                    label_to_color[lbl] = palette[i % len(palette)]
+                for box, lbl in zip(boxes, predicted_labels):
+                    draw.rectangle(box, fill=label_to_color.get(lbl, (0,0,0,120)), outline=None)
 
-            st.write("---")
+                composited = Image.alpha_composite(stitched_image.convert("RGBA"), overlay)
+                st.subheader("Spatial Overlay Map (tiles colored by predicted class)")
+                st.image(composited, caption="Overlay: semi-transparent tile predictions", width="stretch")
 
-            # ---- Overlay map ----
-            overlay = Image.new("RGBA", stitched_image.size, (0,0,0,0))
-            draw = ImageDraw.Draw(overlay)
-            palette = [
-                (31,119,180,140),(255,127,14,140),(44,160,44,140),
-                (214,39,40,140),(148,103,189,140),(140,86,75,140),
-                (227,119,194,140),(127,127,127,140),
-            ]
-            label_to_color = {}
-            for i, lbl in enumerate(sorted(list(set(class_map.values())))):
-                label_to_color[lbl] = palette[i % len(palette)]
-            for box, lbl in zip(crop_boxes, predicted_labels):
-                draw.rectangle(box, fill=label_to_color.get(lbl, (0,0,0,120)), outline=None)
+                # Legend
+                st.write("#### Legend and Percentages")
+                legend_cols = st.columns(len(label_to_color))
+                for i, (lbl, color) in enumerate(label_to_color.items()):
+                    with legend_cols[i]:
+                        sw = Image.new("RGBA", (50, 30), color)
+                        st.image(sw, width=60)
+                        cnt = counts.get(lbl, 0)
+                        pct = (cnt/total_tiles)*100 if total_tiles>0 else 0.0
+                        st.markdown(f"**{lbl}**  \n{cnt} tiles  \n{pct:.2f}%")
 
-            composited = Image.alpha_composite(stitched_image.convert("RGBA"), overlay)
-            st.subheader("Spatial Overlay Map (tiles colored by predicted class)")
-#            st.image(composited, caption="Overlay: semi-transparent tile predictions", use_container_width=True)  # << replaced
-            st.image(composited, caption="Overlay: semi-transparent tile predictions", width="stretch")
+                st.write("---")
 
-            # Legend
-            st.write("#### Legend and Percentages")
-            legend_cols = st.columns(len(label_to_color))
-            for i, (lbl, color) in enumerate(label_to_color.items()):
-                with legend_cols[i]:
-                    sw = Image.new("RGBA", (50, 30), color)
-                    st.image(sw, width=60)
-                    cnt = counts.get(lbl, 0)
-                    pct = (cnt/total_tiles)*100 if total_tiles>0 else 0.0
-                    st.markdown(f"**{lbl}**  \n{cnt} tiles  \n{pct:.2f}%")
+                # Individual tiles – show a capped sample to keep UI light
+                st.subheader("Individual Tile Analysis (sample)")
+                cols = st.columns(4)
+                sample_n = min(MAX_TILE_THUMBNAILS, total_tiles)
+                for i in range(sample_n):
+                    box = boxes[i]
+                    crop = stitched_image.crop(box)
+                    pred_idx = predicted_indices[i]
+                    pred_label = class_map.get(int(pred_idx), f"class_{int(pred_idx)}")
+                    confidence = float(np.max(probs[i]))
+                    col = cols[i % 4]
+                    with col:
+                        st.image(crop, caption=f"Tile #{i+1}", width=min(200, max(64, crop.width // 2)))
+                        st.success(f"Prediction: {pred_label} ({confidence:.3f})")
 
-            st.write("---")
-
-            # Individual tiles
-            st.subheader("Individual Tile Analysis")
-            cols = st.columns(4)
-            for i, (crop, prob_row) in enumerate(zip(cropped_images, probs)):
-                col = cols[i % 4]
-                pred_idx = int(np.argmax(prob_row))
-                pred_label = class_map.get(pred_idx, f"class_{pred_idx}")
-                confidence = float(np.max(prob_row))
-                with col:
-                    st.image(crop, caption=f"Tile #{i+1}", width=min(200, max(64, crop.width // 2)))
-                    st.success(f"Prediction: {pred_label} ({confidence:.3f})")
-
-            # CSV
-            rows = []
-            for i, (box, prob_row) in enumerate(zip(crop_boxes, probs), start=1):
-                x0,y0,x1,y1 = box
-                pred_idx = int(np.argmax(prob_row))
-                pred_label = class_map.get(pred_idx, f"class_{pred_idx}")
-                rows.append({
-                    "tile_id": i, "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
-                    "predicted_label": pred_label, "probability": float(np.max(prob_row))
-                })
-            if st.button("Download Results (CSV)"):
-                import pandas as pd
-                df = pd.DataFrame(rows)
-                st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"),
-                                   "stitched_predictions.csv", "text/csv")
+                # CSV
+                rows = []
+                for i, (box, pi) in enumerate(zip(boxes, probs), start=1):
+                    x0,y0,x1,y1 = box
+                    pred_idx = int(np.argmax(pi))
+                    pred_label = class_map.get(pred_idx, f"class_{pred_idx}")
+                    rows.append({
+                        "tile_id": i, "x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1,
+                        "predicted_label": pred_label, "probability": float(np.max(pi))
+                    })
+                if st.button("Download Results (CSV)"):
+                    import pandas as pd
+                    df = pd.DataFrame(rows)
+                    st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"),
+                                       "stitched_predictions.csv", "text/csv")
+        except Exception as e:
+            # Show any runtime error cleanly in UI
+            st.error("An error occurred during tiling or prediction.")
+            st.exception(e)
 
 else:
     st.info("Please upload a single stitched image (JPEG/PNG) to begin classification.")
@@ -329,6 +329,6 @@ st.markdown(
 Dr. Prashant Maruti Pawar  
 SVERI's College of Engineering, Pandharpur  
 For collaboration or data access, please contact the institute.
-The code update date 04/11/2025 and update: v3
+v4 04nov2025
 """
 )
